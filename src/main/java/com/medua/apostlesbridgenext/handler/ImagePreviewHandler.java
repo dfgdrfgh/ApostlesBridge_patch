@@ -13,6 +13,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.medua.apostlesbridgenext.config.Config;
+import com.medua.apostlesbridgenext.client.ApostlesBridgeNextClient;
 import com.medua.apostlesbridgenext.util.ImagePreview;
 import com.medua.apostlesbridgenext.util.MinecraftClientCompat;
 
@@ -33,6 +34,12 @@ public final class ImagePreviewHandler {
     private static final Set<String> PREVIEWABLE_URLS = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     private ImagePreviewHandler() {}
+
+    public static void shutdown() {
+        PREVIEWS.values().forEach(ImagePreview::close);
+        PREVIEWS.clear();
+        PREVIEWABLE_URLS.clear();
+    }
 
     public static void register() {
         ScreenEvents.AFTER_INIT.register((client, screen, scaledWidth, scaledHeight) -> {
@@ -83,7 +90,7 @@ public final class ImagePreviewHandler {
 
     private static void render(Screen screen, Object context, int mouseX, int mouseY, float tickDelta) {
         Minecraft client = Minecraft.getInstance();
-        if (!(screen instanceof ChatScreen) || client.level == null) {
+        if (ApostlesBridgeNextClient.isStopping() || !(screen instanceof ChatScreen) || client.level == null) {
             return;
         }
 

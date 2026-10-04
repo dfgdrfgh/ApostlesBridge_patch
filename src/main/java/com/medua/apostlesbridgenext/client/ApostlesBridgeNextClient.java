@@ -11,18 +11,29 @@ import com.medua.apostlesbridgenext.handler.WebSocketHandler;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 
 public class ApostlesBridgeNextClient implements ClientModInitializer {
     public static final String MODID = BuildConfig.MODID;
     public static final String VERSION = BuildConfig.VERSION;
     private static final LogHandler LOGGER = new LogHandler(ApostlesBridgeNextClient.class);
     private WebSocketHandler webSocketHandler;
+    private static volatile boolean stopping;
+
+    public static boolean isStopping() {
+        return stopping;
+    }
 
     @Override
     public void onInitializeClient() {
         LOGGER.info(MODID + " v" + VERSION + " initializing..");
 
         webSocketHandler = new WebSocketHandler(this);
+        ClientLifecycleEvents.CLIENT_STOPPING.register(client -> {
+            stopping = true;
+            webSocketHandler.shutdown();
+            ImagePreviewHandler.shutdown();
+        });
 
         // REGISTER COMMANDS
         ApostlesCommand.register(this);

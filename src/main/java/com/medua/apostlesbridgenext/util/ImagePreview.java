@@ -27,7 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-public final class ImagePreview {
+public final class ImagePreview implements AutoCloseable {
     private static final Pattern META_IMAGE_PATTERN = Pattern.compile(
         "<meta\\s+[^>]*(?:property|name)=[\"'](?:og:image|twitter:image)[\"'][^>]*content=[\"']([^\"']+)[\"'][^>]*>|" +
         "<meta\\s+[^>]*content=[\"']([^\"']+)[\"'][^>]*(?:property|name)=[\"'](?:og:image|twitter:image)[\"'][^>]*>",
@@ -43,39 +43,66 @@ public final class ImagePreview {
     private volatile String videoLabel;
     private volatile int width;
     private volatile int height;
+    private boolean closed;
+    private NativeImage pendingImage;
 
     public ImagePreview(String url) {
         this.url = url;
         this.textureId = MinecraftReflectionUtil.createResourceId(ApostlesBridgeNextClient.MODID, "image_preview/" + sha1(url));
     }
 
-    public void load(Minecraft client) {
-        if (loading || failed || width > 0) {
+    public synchronized void load(Minecraft client) {
+        if (closed || ApostlesBridgeNextClient.isStopping() || loading || failed || width > 0) {
             return;
         }
 
         loading = true;
-        CompletableFuture.supplyAsync(this::download).whenComplete((result, throwable) -> {
-            if (throwable != null || result.image() == null) {
-                failureReason = throwable != null ? shortReason(throwable) : result.error();
-                failed = true;
-                loading = false;
-                return;
-            }
+        CompletableFuture.supplyAsync(this::download).whenComplete((result, throwable) -> finishDownload(client, result, throwable));
+    }
 
-            client.execute(() -> {
-                try {
-                    gif = result.gif();
-                    videoLabel = result.videoLabel();
-                    width = result.image().getWidth();
-                    height = result.image().getHeight();
-                    DynamicTexture texture = new DynamicTexture(() -> url, result.image());
-                    registerTexture(client.getTextureManager(), textureId, texture);
-                } finally {
-                    loading = false;
-                }
-            });
-        });
+    private synchronized void finishDownload(Minecraft client, DownloadResult result, Throwable throwable) {
+        if (throwable != null || result.image() == null) {
+            failureReason = throwable != null ? shortReason(throwable) : result.error();
+            failed = true;
+            loading = false;
+            return;
+        }
+        if (closed || ApostlesBridgeNextClient.isStopping()) {
+            result.image().close();
+            loading = false;
+            return;
+        }
+        pendingImage = result.image();
+        client.execute(() -> upload(client, result));
+    }
+
+    private synchronized void upload(Minecraft client, DownloadResult result) {
+        if (closed || ApostlesBridgeNextClient.isStopping()) {
+            close();
+            return;
+        }
+        try {
+            gif = result.gif();
+            videoLabel = result.videoLabel();
+            width = pendingImage.getWidth();
+            height = pendingImage.getHeight();
+            DynamicTexture texture = new DynamicTexture(() -> url, pendingImage);
+            pendingImage = null;
+            // Registered textures are closed by Minecraft's texture manager.
+            registerTexture(client.getTextureManager(), textureId, texture);
+        } finally {
+            loading = false;
+        }
+    }
+
+    @Override
+    public synchronized void close() {
+        closed = true;
+        if (pendingImage != null) {
+            pendingImage.close();
+            pendingImage = null;
+        }
+        loading = false;
     }
 
     public void render(Object context, Minecraft client, int maxWidth, int maxHeight) {

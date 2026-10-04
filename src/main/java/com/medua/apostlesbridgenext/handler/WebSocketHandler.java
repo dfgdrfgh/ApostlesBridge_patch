@@ -49,31 +49,47 @@ public class WebSocketHandler {
     private final AtomicLong connectionGeneration = new AtomicLong(0);
 
     private Timer pendingConnectTimer;
+    private Timer playerWaitTimer;
+    private volatile boolean stopping;
 
     public WebSocketHandler(ApostlesBridgeNextClient apostlesBridge) {
-        this.apostlesBridge = apostlesBridge;
+        this(apostlesBridge, true);
+    }
 
-        waitForPlayerAndConnect();
+    WebSocketHandler(ApostlesBridgeNextClient apostlesBridge, boolean waitForPlayer) {
+        this.apostlesBridge = apostlesBridge;
+        if (waitForPlayer) {
+            waitForPlayerAndConnect();
+        }
     }
 
     private void waitForPlayerAndConnect() {
-        new Timer().schedule(new TimerTask() {
+        playerWaitTimer = new Timer("ApostlesBridge-player-wait", true);
+        playerWaitTimer.schedule(new TimerTask() {
             @Override
             public void run() {
-                if (Minecraft.getInstance().player != null) {
-                    LOGGER.debug("Player detected! Proceeding with WebSocket connection.");
-                    if (shouldConnect()) {
-                        connect();
+                synchronized (WebSocketHandler.this) {
+                    if (stopping) {
+                        return;
                     }
-                    cancel();
-                } else {
-                    LOGGER.debug("Waiting for player to initialize...");
+                    if (Minecraft.getInstance().player != null) {
+                        LOGGER.debug("Player detected! Proceeding with WebSocket connection.");
+                        if (shouldConnect()) {
+                            connect();
+                        }
+                        playerWaitTimer.cancel();
+                    } else {
+                        LOGGER.debug("Waiting for player to initialize...");
+                    }
                 }
             }
         }, 0, 500);
     }
 
-    public void connect() {
+    public synchronized void connect() {
+        if (stopping) {
+            return;
+        }
         if (!canConnect()) {
             LOGGER.warn("Canceled connecting to WebSocket, as the url or the token are unset.");
             return;
@@ -115,7 +131,7 @@ public class WebSocketHandler {
             webSocketClient = new WebSocketClient(new URI(getServerURL())) {
                 @Override
                 public void onOpen(ServerHandshake handshake) {
-                    if (generation != connectionGeneration.get()) {
+                    if (stopping || generation != connectionGeneration.get()) {
                         return;
                     }
                     connecting.set(false);
@@ -128,7 +144,7 @@ public class WebSocketHandler {
 
                 @Override
                 public void onMessage(String messageJson) {
-                    if (generation != connectionGeneration.get()) {
+                    if (stopping || generation != connectionGeneration.get()) {
                         return;
                     }
                     try {
@@ -179,7 +195,11 @@ public class WebSocketHandler {
 
                                     Minecraft client = Minecraft.getInstance();
                                     String finalOutputMessage = outputMessage;
-                                    client.execute(() -> MessageHandler.sendMessageWithLinks(finalOutputMessage, false, urls));
+                                    client.execute(() -> {
+                                        if (!stopping && generation == connectionGeneration.get()) {
+                                            MessageHandler.sendMessageWithLinks(finalOutputMessage, false, urls);
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -190,7 +210,7 @@ public class WebSocketHandler {
 
                 @Override
                 public void onClose(int code, String reason, boolean remote) {
-                    if (generation != connectionGeneration.get()) {
+                    if (stopping || generation != connectionGeneration.get()) {
                         return;
                     }
                     connecting.set(false);
@@ -203,7 +223,7 @@ public class WebSocketHandler {
 
                 @Override
                 public void onError(Exception e) {
-                    if (generation != connectionGeneration.get()) {
+                    if (stopping || generation != connectionGeneration.get()) {
                         return;
                     }
                     connecting.set(false);
@@ -237,6 +257,9 @@ public class WebSocketHandler {
     }
 
     private boolean shouldConnect() {
+        if (stopping) {
+            return false;
+        }
         if (webSocketClient != null && webSocketClient.isOpen()) {
             LOGGER.debug("Reconnect skipped: WebSocket is already connected.");
             return false;
@@ -299,12 +322,15 @@ public class WebSocketHandler {
     }
 
     private synchronized void scheduleReconnect() {
+        if (stopping) {
+            return;
+        }
         if (reconnectTimer != null) {
             reconnectTimer.cancel();
             reconnectTimer.purge();
         }
 
-        reconnectTimer = new Timer();
+        reconnectTimer = new Timer("ApostlesBridge-reconnect", true);
         reconnectScheduled = true;
         sendConnectionDebugMessage("Reconnecting to WebSocket in 30 seconds..");
         reconnectTimer.schedule(new TimerTask() {
@@ -322,12 +348,15 @@ public class WebSocketHandler {
     }
 
     private synchronized void scheduleDelayedConnect() {
+        if (stopping) {
+            return;
+        }
         if (pendingConnectTimer != null) {
             pendingConnectTimer.cancel();
             pendingConnectTimer.purge();
         }
 
-        pendingConnectTimer = new Timer();
+        pendingConnectTimer = new Timer("ApostlesBridge-delayed-connect", true);
         pendingConnectTimer.schedule(new TimerTask() {
             @Override
             public void run() {
@@ -401,6 +430,9 @@ public class WebSocketHandler {
     }
 
     public synchronized void restartWebSocket(boolean clearSession) {
+        if (stopping) {
+            return;
+        }
         if (clearSession) {
             authKey = "";
         }
@@ -443,6 +475,9 @@ public class WebSocketHandler {
     }
 
     public synchronized void disconnectWebSocket(boolean clearSession) {
+        if (stopping) {
+            return;
+        }
         if (clearSession) {
             authKey = "";
         }
@@ -468,8 +503,34 @@ public class WebSocketHandler {
     }
 
     private void sendConnectionDebugMessage(String message) {
-        if (Config.isConnectionDebugMessagesEnabled()) {
+        if (!stopping && Config.isConnectionDebugMessagesEnabled()) {
             MessageHandler.sendSystemMessage(message);
+        }
+    }
+
+    public synchronized void shutdown() {
+        if (stopping) {
+            return;
+        }
+        stopping = true;
+        connectionGeneration.incrementAndGet();
+        connecting.set(false);
+        reconnectScheduled = false;
+        forceDisconnected = true;
+        for (Timer timer : new Timer[] { playerWaitTimer, reconnectTimer, pendingConnectTimer }) {
+            if (timer != null) {
+                timer.cancel();
+            }
+        }
+        playerWaitTimer = null;
+        reconnectTimer = null;
+        pendingConnectTimer = null;
+        if (webSocketClient != null) {
+            try {
+                webSocketClient.close();
+            } catch (RuntimeException exception) {
+                LOGGER.warn("Failed to close WebSocket during shutdown: " + exception.getMessage());
+            }
         }
     }
 

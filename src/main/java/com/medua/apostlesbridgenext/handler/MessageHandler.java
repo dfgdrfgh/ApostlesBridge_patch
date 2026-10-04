@@ -39,6 +39,9 @@ public class MessageHandler {
     }
 
     public static void sendMessage(Component message) {
+        if (ApostlesBridgeNextClient.isStopping()) {
+            return;
+        }
         Minecraft client = Minecraft.getInstance();
         if (!client.isSameThread()) {
             client.execute(() -> sendMessage(message));
@@ -61,6 +64,9 @@ public class MessageHandler {
     }
 
     public static void sendMessageWithLinks(String message, boolean prefix, List<String> urls) {
+        if (ApostlesBridgeNextClient.isStopping()) {
+            return;
+        }
         Minecraft client = Minecraft.getInstance();
         if (!client.isSameThread()) {
             client.execute(() -> sendMessageWithLinks(message, prefix, urls));
